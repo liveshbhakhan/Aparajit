@@ -1,0 +1,45 @@
+:81 {
+	# ── SECURITY: restrict dynamic port forwarding to a safe allow-list ──────
+	# The XTransformPort query handler lets the SPA reach mini-services on
+	# other ports (websocket chat, etc.). Previously this was an OPEN SSRF:
+	# any client could send ?XTransformPort=6379 to reach Redis on the host,
+	# or ?XTransformPort=169.254.169.254 to hit the cloud metadata endpoint.
+	#
+	# We now allow-list only the ports this project actually uses for
+	# mini-services: 3000-3999. The Next.js dev server itself listens on
+	# 3000 (always allowed via the catch-all handler below), and any
+	# mini-service started under mini-services/ uses a port in the 3001-3999
+	# range. Anything outside that range is rejected with a 403.
+	@transform_port_query {
+		query XTransformPort={re.3[0-9]{3}}
+	}
+
+	handle @transform_port_query {
+		reverse_proxy localhost:{query.XTransformPort} {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Anything else with an XTransformPort query (outside the 3000-3999
+	# range) is rejected with a 403 — defense-in-depth against the SSRF.
+	@blocked_transform_port {
+		query XTransformPort=*
+		not query XTransformPort={re.3[0-9]{3}}
+	}
+	handle @blocked_transform_port {
+		respond "Forbidden: dynamic port forwarding is restricted to 3000-3999" 403
+	}
+
+	# Default — proxy to the Next.js dev server on :3000
+	handle {
+		reverse_proxy localhost:3000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}
